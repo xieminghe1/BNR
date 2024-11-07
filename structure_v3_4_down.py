@@ -109,7 +109,7 @@ class VideoDenoise(nn.Module):
         self.fusion = Fusion(10)
         # self.denoise = Denoise(in_chn = 25 if from_down else 21, feature_chn=feature_chn, block_num=6 if top else 3)
         self.denoise = Denoise(in_chn = 21, feature_chn=feature_chn, block_num=3)
-        self.avg_pool = nn.AvgPool2d(kernel_size=2, stride=2)
+        self.avg_pool = nn.AvgPool2d(kernel_size=4, stride=4)
         self.top = top
 
     def forward(self, prev, curr, prev_sigma, curr_sigma, blend):
@@ -119,8 +119,11 @@ class VideoDenoise(nn.Module):
         # fusion
         fusion_in = torch.cat([ll1, ll0, prev_sigma, curr_sigma], dim=1)
         fusion_in = self.avg_pool(fusion_in)
-        gamma = self.fusion(fusion_in) * blend
+        print(fusion_in.shape)
+        gamma = blend*self.fusion(fusion_in) * blend
         gamma = F.interpolate(gamma, size=(360,640))
+        # fusion
+        # fusion_out = torch.mul(prev, gamma) + torch.mul(curr, (1 - gamma))
         fusion_out = curr - torch.mul(curr-prev,gamma)
         curr_sigma=curr_sigma.reshape(1,64,45,80)
         prev_sigma=prev_sigma.reshape(1,64,45,80)
@@ -159,43 +162,54 @@ class MainDenoise(nn.Module):
 
     def forward(self, noisy_img, fusion_img=torch.randn((1,4,720,1280)), prev_sigma0=torch.randn((1,1,360,640)), coeff_a=1, coeff_b=1, blend=0, motion_fr=0., static_dr=0., black_level=torch.randn((1,4,8,8)), curBlend_ratio_3d=0., curBlend_ratio_2d=0.):
 
+
         black_level = F.interpolate(black_level, size=(45, 80), mode='bilinear', align_corners=False)
         black_level = F.interpolate(black_level, size=(720, 1280))
+
         noisy_img = noisy_img.reshape(1,256,180,80)
         black_level = black_level.reshape(1,256,180,80)
 
         cvt_k = 0.024641 / coeff_a + coeff_b * 0
-        cvt_k =torch.max(cvt_k, torch.ones_like(cvt_k)*0.8) 
+        cvt_k = torch.max(cvt_k, torch.ones_like(cvt_k)*0.8)
         cvt_k1 = 1/cvt_k
+
+
         noisy_img = ((noisy_img - black_level).clip(0., 4095) + 112) / (4319 - black_level)*cvt_k
         noisy_img = noisy_img.reshape(1,4,720,1280)
         curr_ft = self.transform(noisy_img)
 
+
         curr_sigma = curr_ft[:, 0:1, :, :] * 0.024641 + 0.001317
-        curr_ft=curr_ft.reshape(1,256,180,80)
-        fusion_img=fusion_img.reshape(1,256,180,80)
+        curr_ft=curr_ft.reshape(16,64,45,80)
+        fusion_img=fusion_img.reshape(16,64,45,80)
+
         curr_sigma=curr_sigma.reshape(1,64,45,80)
         prev_sigma0=prev_sigma0.reshape(1,64,45,80)
+        
         prev_ft = curr_ft*(1-blend) + fusion_img*blend
         prev_sigma = curr_sigma*(1-blend) + prev_sigma0*blend    
+
         prev_sigma=prev_sigma.reshape(1,1,360,640)
         curr_sigma=curr_sigma.reshape(1,1,360,640)
         prev_sigma0=prev_sigma0.reshape(1,1,360,640)
+        
         curr_ft=curr_ft.reshape(1,16,360,640)
         fusion_img=fusion_img.reshape(1,16,360,640)
         prev_ft=prev_ft.reshape(1,16,360,640)   
+
+
         gamma, fusion_out, denoise_out, sigma = self.vd(prev_ft, curr_ft, prev_sigma, curr_sigma, blend)
 
         # refine
         refine_in = torch.cat([fusion_out, denoise_out, sigma], axis=1)  
         refine_in = self.max_pool(refine_in)
         omega = self.refine(refine_in)
-        omega = F.interpolate(omega, size=(360,640), mode="bilinear")
+        print(omega.shape)
+        omega = F.interpolate(omega, size=(360,640))
         gamma=gamma.reshape(1,64,45,80)
         gamma_clip = gamma.clip(motion_fr, static_dr)
         gamma_clip = gamma_clip.reshape(1,1,360,640)
         gamma=gamma.reshape(1,1,360,640)
-        # gamma_clip = gamma.clip(motion_fr, static_dr)
 
 
         refine_out_pre = denoise_out-torch.mul(denoise_out-fusion_out,gamma_clip)
@@ -209,7 +223,7 @@ class MainDenoise(nn.Module):
         refine_out = refine_out - torch.mul(diff, gamma_ref_3d + gamma_ref_2d)
         refine_out = self.transforminv(refine_out)
         refine_out = refine_out * cvt_k1  * 4095 + 15
-    
+
         return refine_out, fusion_out, sigma
 
 
@@ -248,7 +262,7 @@ if __name__ == "__main__":
 
     dummy_input = (noisy_img, fusion_img, prev_sigma0, coeff_a, coeff_b, blend, motion_fr, static_dr, black_level, curBlend_ratio_3d, curBlend_ratio_2d)
     input_names = ("noisy_img", "fusion_img", "prev_sigma0", "coeff_a", "coeff_b", "blend", "motion_fr", "static_dr", "black_level", "curBlend_ratio_3d", "curBlend_ratio_2d")
-    dynamic_axes = {'noisy_img': {0: 'batch', 2: 'height', 3: 'width'}, 'fusion_img': {0: 'batch', 2: 'height', 3: 'width'}, 'prev_sigma0': {0: 'batch', 2: 'height', 3: 'width'}}
+    # dynamic_axes = {'noisy_img': {0: 'batch', 2: 'height', 3: 'width'}, 'fusion_img': {0: 'batch', 2: 'height', 3: 'width'}, 'prev_sigma0': {0: 'batch', 2: 'height', 3: 'width'}}
 
     # torch.onnx.export(model, dummy_input, 'new102400ks_anchor102400_v3_4_groff_dloff_2048_112all_finetune2_normorg_0930.onnx' ,input_names=input_names) 
     torch.onnx.export(model, dummy_input, 'reshape_test_down.onnx' ,input_names=input_names) 
